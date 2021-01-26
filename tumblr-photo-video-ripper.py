@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
 
+import json
 import os
+import re
 import sys
+import xml.dom.minidom
+from threading import Thread
+
 import requests
 import xmltodict
 from six.moves import queue as Queue
-from threading import Thread
-import re
-import json
-
 
 # Setting timeout
 TIMEOUT = 10
@@ -16,7 +17,7 @@ TIMEOUT = 10
 # Retry times
 RETRY = 5
 
-# Medium Index Number that Starts from
+# Media Index Number that Starts from
 START = 0
 
 # Numbers of photos/videos per page
@@ -40,6 +41,7 @@ def video_hd_match():
                 return hd_match.group(2).replace('\\', '')
         except:
             return None
+
     return match
 
 
@@ -53,6 +55,7 @@ def video_default_match():
                 return default_match.group(1)
             except:
                 return None
+
     return match
 
 
@@ -65,15 +68,15 @@ class DownloadWorker(Thread):
 
     def run(self):
         while True:
-            medium_type, post, target_folder = self.queue.get()
-            self.download(medium_type, post, target_folder)
+            media_type, post, target_folder = self.queue.get()
+            self.download(media_type, post, target_folder)
             self.queue.task_done()
 
-    def download(self, medium_type, post, target_folder):
+    def download(self, media_type, post, target_folder):
         try:
-            medium_url = self._handle_medium_url(medium_type, post)
-            if medium_url is not None:
-                self._download(medium_type, medium_url, target_folder)
+            media_url = self._handle_media_url(media_type, post)
+            if media_url is not None:
+                self._download(media_type, media_url, target_folder)
         except TypeError:
             pass
 
@@ -83,12 +86,12 @@ class DownloadWorker(Thread):
         # the first matched result will be returned
         self.regex_rules = [video_hd_match(), video_default_match()]
 
-    def _handle_medium_url(self, medium_type, post):
+    def _handle_media_url(self, media_type, post):
         try:
-            if medium_type == "photo":
+            if media_type == "photo":
                 return post["photo-url"][0]["#text"]
 
-            if medium_type == "video":
+            if media_type == "video":
                 video_player = post["video-player"][1]["#text"]
                 for regex_rule in self.regex_rules:
                     matched_url = regex_rule(video_player)
@@ -103,34 +106,28 @@ class DownloadWorker(Thread):
                             "issues/new attached with below information:\n\n"
                             "%s" % post)
 
-    def _download(self, medium_type, medium_url, target_folder):
-        medium_name = medium_url.split("/")[-1].split("?")[0]
-        if medium_type == "video":
-            if not medium_name.startswith("tumblr"):
-                medium_name = "_".join([medium_url.split("/")[-2],
-                                        medium_name])
+    def _download(self, media_type, media_url, target_folder):
+        media_name = media_url.split("/")[-1].split("?")[0]
+        if media_type == "video":
+            if not media_name.startswith("tumblr"):
+                media_name = "_".join([media_url.split("/")[-2], media_name])
 
-            medium_name += ".mp4"
-            medium_url = 'https://vt.tumblr.com/' + medium_name
+            media_name += ".mp4"
+            media_url = 'https://vt.tumblr.com/' + media_name
 
-        file_path = os.path.join(target_folder, medium_name)
+        file_path = os.path.join(target_folder, media_name)
         if not os.path.isfile(file_path):
-            print("Downloading %s from %s.\n" % (medium_name,
-                                                 medium_url))
+            print("Downloading %s from %s.\n" % (media_name, media_url))
             retry_times = 0
             while retry_times < RETRY:
                 try:
-                    resp = requests.get(medium_url,
-                                        stream=True,
-                                        proxies=self.proxies,
-                                        timeout=TIMEOUT)
+                    resp = requests.get(media_url, stream=True, proxies=self.proxies, timeout=TIMEOUT)
                     if resp.status_code == 403:
                         retry_times = RETRY
-                        print("Access Denied when retrieve %s.\n" % medium_url)
+                        print("Access Denied when retrieve %s.\n" % media_url)
                         raise Exception("Access Denied")
                     with open(file_path, 'wb') as fh:
-                        for chunk in resp.iter_content(chunk_size=1024):
-                            fh.write(chunk)
+                        fh.write(resp.content)
                     break
                 except:
                     # try again
@@ -141,12 +138,10 @@ class DownloadWorker(Thread):
                     os.remove(file_path)
                 except OSError:
                     pass
-                print("Failed to retrieve %s from %s.\n" % (medium_type,
-                                                            medium_url))
+                print("Failed to retrieve %s from %s.\n" % (media_type, media_url))
 
 
 class CrawlerScheduler(object):
-
     def __init__(self, sites, proxies=None):
         self.sites = sites
         self.proxies = proxies
@@ -155,9 +150,8 @@ class CrawlerScheduler(object):
 
     def scheduling(self):
         # create workers
-        for x in range(THREADS):
-            worker = DownloadWorker(self.queue,
-                                    proxies=self.proxies)
+        for _ in range(THREADS):
+            worker = DownloadWorker(self.queue, proxies=self.proxies)
             # Setting daemon to True will let the main thread exit
             # even though the workers are blocking
             worker.daemon = True
@@ -168,7 +162,7 @@ class CrawlerScheduler(object):
 
     def download_media(self, site):
         self.download_photos(site)
-        self.download_videos(site)
+        # self.download_videos(site)
 
     def download_videos(self, site):
         self._download_media(site, "video", START)
@@ -184,7 +178,7 @@ class CrawlerScheduler(object):
         self.queue.join()
         print("Finish Downloading All the photos from %s" % site)
 
-    def _download_media(self, site, medium_type, start):
+    def _download_media(self, site, media_type, start):
         current_folder = os.getcwd()
         target_folder = os.path.join(current_folder, site)
         if not os.path.isdir(target_folder):
@@ -193,22 +187,19 @@ class CrawlerScheduler(object):
         base_url = "https://{0}.tumblr.com/api/read?type={1}&num={2}&start={3}"
         start = START
         while True:
-            media_url = base_url.format(site, medium_type, MEDIA_NUM, start)
-            response = requests.get(media_url,
-                                    proxies=self.proxies)
+            media_url = base_url.format(site, media_type, MEDIA_NUM, start)
+            response = requests.get(media_url, proxies=self.proxies)
             if response.status_code == 404:
                 print("Site %s does not exist" % site)
                 break
 
             try:
-                xml_cleaned = re.sub(u'[^\x20-\x7f]+',
-                                     u'', response.content.decode('utf-8'))
+                response_file = "{0}/{0}_{1}_{2}_{3}.response.xml".format(site, media_type, start, MEDIA_NUM)
+                with open(response_file, "w", encoding='utf-8') as text_file:
+                    x = xml.dom.minidom.parseString(response.text).toprettyxml()
+                    text_file.write(x)
 
-                response_file = "{0}/{0}_{1}_{2}_{3}.response.xml".format(site, medium_type, MEDIA_NUM, start)
-                with open(response_file, "w") as text_file:
-                    text_file.write(xml_cleaned)
-
-                data = xmltodict.parse(xml_cleaned)
+                data = xmltodict.parse(response.text)
                 posts = data["tumblr"]["posts"]["post"]
                 for post in posts:
                     # by default it is switched to false to generate less files,
@@ -222,11 +213,11 @@ class CrawlerScheduler(object):
                         # if post has photoset, walk into photoset for each photo
                         photoset = post["photoset"]["photo"]
                         for photo in photoset:
-                            self.queue.put((medium_type, photo, target_folder))
+                            self.queue.put((media_type, photo, target_folder))
                     except:
                         # select the largest resolution
                         # usually in the first element
-                        self.queue.put((medium_type, post, target_folder))
+                        self.queue.put((media_type, post, target_folder))
                 start += MEDIA_NUM
             except KeyError:
                 break
@@ -258,9 +249,7 @@ def illegal_json():
     print("Illegal JSON format in file 'proxies.json'.\n"
           "Please refer to 'proxies_sample1.json' and 'proxies_sample2.json'.\n"
           "And go to http://jsonlint.com/ for validation.\n\n\n")
-    print(u"文件proxies.json格式非法.\n"
-          u"请参照示例文件'proxies_sample1.json'和'proxies_sample2.json'.\n"
-          u"然后去 http://jsonlint.com/ 进行验证.")
+    print(u"文件proxies.json格式非法.\n" u"请参照示例文件'proxies_sample1.json'和'proxies_sample2.json'.\n" u"然后去 http://jsonlint.com/ 进行验证.")
 
 
 def parse_sites(filename):
