@@ -11,6 +11,9 @@ import requests
 import xmltodict
 from six.moves import queue as Queue
 
+from utils import logger, map_mime2exts
+from ykmlib.fs import makedirs
+
 # Setting timeout
 TIMEOUT = 10
 
@@ -24,7 +27,7 @@ START = 0
 MEDIA_NUM = 50
 
 # Numbers of downloading threads concurrently
-THREADS = 10
+THREADS = 1
 
 # Do you like to dump each post as separate json (otherwise you have to extract from bulk xml files)
 # This option is for convenience for terminal users who would like to query e.g. with ./jq (https://stedolan.github.io/jq/)
@@ -107,27 +110,55 @@ class DownloadWorker(Thread):
                             "%s" % post)
 
     def _download(self, media_type, media_url, target_folder):
-        media_name = media_url.split("/")[-1].split("?")[0]
+        media_name = media_url.split("/")[-1].split("?")[0]  # maybe changed later
         if media_type == "video":
             if not media_name.startswith("tumblr"):
                 media_name = "_".join([media_url.split("/")[-2], media_name])
 
             media_name += ".mp4"
-            media_url = 'https://vt.tumblr.com/' + media_name
+            media_url = 'https://vt.tumblr.com/' + media_name  # will not changed
 
-        file_path = os.path.join(target_folder, media_name)
+        file_path = os.path.join(target_folder, media_name)  # maybe changed later
         if not os.path.isfile(file_path):
-            print("Downloading %s from %s.\n" % (media_name, media_url))
+            logger.info("Downloading %s", media_url)
             retry_times = 0
             while retry_times < RETRY:
                 try:
                     resp = requests.get(media_url, stream=True, proxies=self.proxies, timeout=TIMEOUT)
+
+                    # check headers and correct filename
+                    content_disposition = resp.headers.get('Content-Disposition')
+                    if content_disposition is not None:
+                        match = re.search('filename="(.+)"', content_disposition)
+                        if match is not None:
+                            logger.info(f'filename changes from {media_name} to {match.group(1)}')
+                            media_name = match.group(1)
+
+                    _media_name_base, _media_name_ext = os.path.splitext(media_name)
+
+                    content_type = resp.headers.get('Content-Type')
+                    if content_type is not None:
+                        match = re.search('image/(.+)', content_type)
+                        if match is not None:
+                            mime_type = match.group(1)
+                            if mime_type not in map_mime2exts.keys():
+                                raise KeyError(f'unknown mime type image/{mime_type}')
+                            if _media_name_ext[1:] in map_mime2exts[mime_type]:
+                                logger.info(f'ext {_media_name_ext} matches mime image/{mime_type}')
+                            else:
+                                logger.info(f'ext changes from {_media_name_ext} to .{map_mime2exts[mime_type][0]}')
+                                media_name = f'{_media_name_base}.{map_mime2exts[mime_type][0]}'
+
+                    file_path = os.path.join(target_folder, media_name)
+                    # check headers and correct filename
+
                     if resp.status_code == 403:
                         retry_times = RETRY
-                        print("Access Denied when retrieve %s.\n" % media_url)
+                        logger.info("Access Denied when retrieve %s.\n", media_url)
                         raise Exception("Access Denied")
                     with open(file_path, 'wb') as fh:
                         fh.write(resp.content)
+                    logger.info('')
                     break
                 except:
                     # try again
@@ -138,7 +169,7 @@ class DownloadWorker(Thread):
                     os.remove(file_path)
                 except OSError:
                     pass
-                print("Failed to retrieve %s from %s.\n" % (media_type, media_url))
+                logger.info("Failed to retrieve %s from %s.\n", media_type, media_url)
 
 
 class CrawlerScheduler(object):
@@ -169,14 +200,14 @@ class CrawlerScheduler(object):
         # wait for the queue to finish processing all the tasks from one
         # single site
         self.queue.join()
-        print("Finish Downloading All the videos from %s" % site)
+        logger.info("Finish Downloading All the videos from %s", site)
 
     def download_photos(self, site):
         self._download_media(site, "photo", START)
         # wait for the queue to finish processing all the tasks from one
         # single site
         self.queue.join()
-        print("Finish Downloading All the photos from %s" % site)
+        logger.info("Finish Downloading All the photos from %s", site)
 
     def _download_media(self, site, media_type, start):
         current_folder = os.getcwd()
@@ -190,7 +221,7 @@ class CrawlerScheduler(object):
             media_url = base_url.format(site, media_type, MEDIA_NUM, start)
             response = requests.get(media_url, proxies=self.proxies)
             if response.status_code == 404:
-                print("Site %s does not exist" % site)
+                logger.info("Site %s does not exist", site)
                 break
 
             try:
@@ -222,10 +253,10 @@ class CrawlerScheduler(object):
             except KeyError:
                 break
             except UnicodeDecodeError:
-                print("Cannot decode response data from URL %s" % media_url)
+                logger.info("Cannot decode response data from URL %s", media_url)
                 continue
             except:
-                print("Unknown xml-vulnerabilities from URL %s" % media_url)
+                logger.info("Unknown xml-vulnerabilities from URL %s", media_url)
                 continue
 
 
@@ -281,7 +312,7 @@ if __name__ == "__main__":
             try:
                 proxies = json.load(fj)
                 if proxies is not None and len(proxies) > 0:
-                    print("You are using proxies.\n%s" % proxies)
+                    logger.info("You are using proxies.\n%s", proxies)
             except:
                 illegal_json()
                 sys.exit(1)
