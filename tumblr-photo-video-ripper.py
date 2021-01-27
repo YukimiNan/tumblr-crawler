@@ -12,7 +12,7 @@ import xmltodict
 from six.moves import queue as Queue
 
 from utils import logger, map_mime2exts
-from ykmlib.fs import makedirs
+from ykmlib.fs import dump_json, load_json
 
 # Setting timeout
 TIMEOUT = 10
@@ -76,12 +76,10 @@ class DownloadWorker(Thread):
             self.queue.task_done()
 
     def download(self, media_type, post, target_folder):
-        try:
-            media_url = self._handle_media_url(media_type, post)
-            if media_url is not None:
-                self._download(media_type, media_url, target_folder)
-        except TypeError:
-            pass
+        # PLEASE! please raise those exception for debugging, DO NOT "except: pass" anymore!
+        media_url = self._handle_media_url(media_type, post)
+        if media_url is not None:
+            self._download(media_type, media_url, target_folder)
 
     # can register different regex match rules
     def _register_regex_match_rules(self):
@@ -110,6 +108,12 @@ class DownloadWorker(Thread):
                             "%s" % post)
 
     def _download(self, media_type, media_url, target_folder):
+        record_path = os.path.join(target_folder, 'downloaded.json')
+        j = load_json(record_path)
+        if j is not None and media_url in j.keys():
+            logger.info('Already downloaded: %s', media_url)
+            return
+
         media_name = media_url.split("/")[-1].split("?")[0]  # maybe changed later
         if media_type == "video":
             if not media_name.startswith("tumblr"):
@@ -131,7 +135,7 @@ class DownloadWorker(Thread):
                     if content_disposition is not None:
                         match = re.search('filename="(.+)"', content_disposition)
                         if match is not None:
-                            logger.info(f'filename changes from {media_name} to {match.group(1)}')
+                            logger.info('filename changes from %s to %s', media_name, match.group(1))
                             media_name = match.group(1)
 
                     _media_name_base, _media_name_ext = os.path.splitext(media_name)
@@ -144,9 +148,9 @@ class DownloadWorker(Thread):
                             if mime_type not in map_mime2exts.keys():
                                 raise KeyError(f'unknown mime type image/{mime_type}')
                             if _media_name_ext[1:] in map_mime2exts[mime_type]:
-                                logger.info(f'ext {_media_name_ext} matches mime image/{mime_type}')
+                                logger.info('ext %s matches mime image/%s', _media_name_ext, mime_type)
                             else:
-                                logger.info(f'ext changes from {_media_name_ext} to .{map_mime2exts[mime_type][0]}')
+                                logger.info('ext changes from %s to .%s', _media_name_ext, map_mime2exts[mime_type][0])
                                 media_name = f'{_media_name_base}.{map_mime2exts[mime_type][0]}'
 
                     file_path = os.path.join(target_folder, media_name)
@@ -156,19 +160,25 @@ class DownloadWorker(Thread):
                         retry_times = RETRY
                         logger.info("Access Denied when retrieve %s.\n", media_url)
                         raise Exception("Access Denied")
+
                     with open(file_path, 'wb') as fh:
                         fh.write(resp.content)
-                    logger.info('')
+                    j = load_json(record_path) or {}
+                    j[media_url] = media_name
+                    dump_json(j, record_path)
+
+                    print('')
                     break
                 except:
+                    # please! please raise/log those exception for debugging, DO NOT "except: pass" anymore!
+                    logger.exception('retry_times=%s:\n', retry_times)
                     # try again
-                    pass
                 retry_times += 1
             else:
                 try:
                     os.remove(file_path)
                 except OSError:
-                    pass
+                    logger.exception()
                 logger.info("Failed to retrieve %s from %s.\n", media_type, media_url)
 
 
